@@ -1,0 +1,775 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Drone Arena</title>
+<style>
+  :root {
+    --bg: #f5f4f0; --card: #ffffff; --fg: #15171a; --muted: #5d6470;
+    --accent: #d99a00; --btn-fg: #111; --err: #b91c1c; --line: #d9d6cc;
+    color-scheme: light dark;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0c0e11; --card: #16191e; --fg: #eceef1; --muted: #9aa2ad;
+      --accent: #f5b82e; --btn-fg: #111; --err: #ef4444; --line: #2a2f37;
+    }
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    margin: 0; height: 100%; background: var(--bg); color: var(--fg);
+    font-family: -apple-system, system-ui, "Segoe UI", Roboto, sans-serif;
+  }
+  body { display: flex; flex-direction: column; overflow: hidden; }
+
+  header {
+    display: flex; align-items: center; gap: 8px; padding: 10px 12px;
+    padding-top: calc(10px + env(safe-area-inset-top, 0px));
+    border-bottom: 1px solid var(--line);
+  }
+  header h1 { font-size: 17px; margin: 0; font-weight: 700; letter-spacing: .2px; }
+  #stats { flex: 1; text-align: center; font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; }
+
+  #stage {
+    position: relative; flex: 1; min-height: 0; background: #000;
+    display: flex; align-items: center; justify-content: center; overflow: hidden;
+  }
+  #view { display: block; width: auto; height: auto; max-width: 100%; max-height: 100%; }
+  #video { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+  #toast {
+    position: absolute; top: 12px; left: 50%; transform: translateX(-50%);
+    background: rgba(0,0,0,.72); color: #fff; padding: 8px 14px; border-radius: 10px;
+    font-size: 16px; opacity: 0; transition: opacity .25s; pointer-events: none; white-space: nowrap;
+  }
+  #toast.show { opacity: 1; }
+
+  #panel {
+    padding: 12px 12px calc(14px + env(safe-area-inset-bottom, 0px));
+    background: var(--card); border-top: 1px solid var(--line);
+  }
+  #hint { font-size: 15px; line-height: 1.4; margin: 0 0 10px; color: var(--muted); min-height: 2.8em; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; }
+
+  button {
+    flex: 1 1 30%; min-width: 96px; padding: 12px 10px; border: none; border-radius: 12px;
+    font-size: 16px; font-weight: 600; background: var(--accent); color: var(--btn-fg); cursor: pointer;
+  }
+  button.sec { background: transparent; color: var(--fg); border: 1.5px solid var(--line); }
+  button.small { flex: none; min-width: 0; padding: 7px 10px; font-size: 13px; }
+  button:disabled { opacity: .4; cursor: default; }
+
+  .err {
+    display: none; background: var(--err); color: #fff; padding: 10px 12px;
+    border-radius: 10px; margin: 0 0 10px; font-size: 15px; line-height: 1.4;
+  }
+  .err.show { display: block; }
+
+  #menu {
+    position: fixed; inset: 0; z-index: 10; display: flex; flex-direction: column;
+    justify-content: center; align-items: center; gap: 14px; padding: 24px; background: var(--bg);
+  }
+  #menu h2 { font-size: 34px; margin: 0; letter-spacing: .5px; }
+  #menu p { color: var(--muted); text-align: center; margin: 0; max-width: 320px; line-height: 1.45; }
+  #menu .err { width: 100%; max-width: 320px; }
+  #menu button { width: 100%; max-width: 320px; flex: none; font-size: 18px; padding: 16px; }
+</style>
+</head>
+<body>
+
+<div id="menu">
+  <h2>Drone Arena</h2>
+  <p>Пролетите через ворота и не задевайте препятствия за 120 секунд.</p>
+  <p>Если разметка уже сохранена, она загрузится автоматически.</p>
+  <div id="menuError" class="err"></div>
+  <button id="btnCam">Камера</button>
+  <button id="btnFile" class="sec">Видео из файла</button>
+  <input type="file" id="fileInput" accept="video/*" style="display:none">
+</div>
+
+<header>
+  <h1>Drone Arena</h1>
+  <div id="stats"></div>
+  <button id="soundBtn" class="sec small">Звук: вкл</button>
+  <button id="menuBtn" class="sec small">Меню</button>
+</header>
+
+<div id="stage">
+  <video id="video" playsinline muted></video>
+  <canvas id="view" width="640" height="480"></canvas>
+  <div id="toast"></div>
+</div>
+
+<div id="panel">
+  <div id="error" class="err"></div>
+  <p id="hint"></p>
+  <div id="btns" class="row"></div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const video = $('video');
+const view = $('view');
+const vctx = view.getContext('2d');
+
+// Маленькая копия кадра для быстрой обработки
+const SW = 160, SH = 120;
+const small = document.createElement('canvas');
+small.width = SW; small.height = SH;
+const sctx = small.getContext('2d', { willReadFrequently: true });
+
+const STORE_KEY = 'droneArena_v1';
+const GAME_SECONDS = 120;
+const DIFF = 35;        // насколько должна измениться яркость пикселя (0–255), чтобы считаться «дроном»
+const MIN_PIX = 12;     // минимум изменившихся пикселей, иначе это шум
+const MAX_FRAC = 0.4;   // если изменилась почти вся зона — это свет или тень, а не дрон
+const GATE_FRAMES = 3;  // сколько кадров подряд дрон должен быть в воротах
+const GATE_COOLDOWN = 1500;
+const OBST_COOLDOWN = 1000;
+const OBST_R = 0.05;    // радиус препятствия в долях высоты кадра
+const MELODY = [523, 587, 659, 784, 659, 587, 523, 440];
+
+const state = {
+  phase: 'menu',        // menu, zone, gates, obstacles, bg, ready, countdown, playing, over
+  zone: [], gates: [], obstacles: [], pending: [],
+  bg: null, mask: null, maskCount: 0, drone: null,
+  score: 0, gatesPassed: 0, hits: 0, endTime: 0,
+  soundOn: true, frameNo: 0, videoReady: false, countdownText: ''
+};
+let gateStates = [], obstStates = [];
+let sampling = null;      // сбор кадров для запоминания фона
+let stream = null, audioCtx = null, melodyTimer = null, toastTimer = null;
+
+/* ---------- Сообщения и ошибки ---------- */
+
+function toast(msg) {
+  const t = $('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('show'), 1500);
+}
+
+function showError(msg) {
+  ['error', 'menuError'].forEach(id => {
+    const el = $(id);
+    el.textContent = msg;
+    el.classList.add('show');
+  });
+}
+
+function clearError() {
+  ['error', 'menuError'].forEach(id => $(id).classList.remove('show'));
+}
+
+function camError(e) {
+  const n = e && e.name;
+  if (n === 'NotAllowedError' || n === 'SecurityError')
+    return 'Нет доступа к камере. Разрешите камеру в настройках (на iPhone: Настройки → Safari → Камера) и обновите страницу.';
+  if (n === 'NotFoundError' || n === 'OverconstrainedError')
+    return 'Камера не найдена на этом устройстве.';
+  if (n === 'NotReadableError')
+    return 'Камера занята другим приложением. Закройте его и попробуйте снова.';
+  return 'Не удалось открыть камеру' + (e && e.message ? ': ' + e.message : '.');
+}
+
+/* ---------- Звук ---------- */
+
+function getAudio() {
+  if (!audioCtx) {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (AC) audioCtx = new AC();
+  }
+  if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+  return audioCtx;
+}
+
+function beep(freq, dur, type = 'sine', vol = 0.15) {
+  if (!state.soundOn) return;
+  const ctx = getAudio();
+  if (!ctx) return;
+  const o = ctx.createOscillator(), g = ctx.createGain();
+  o.type = type;
+  o.frequency.value = freq;
+  g.gain.setValueAtTime(vol, ctx.currentTime);
+  g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + dur);
+  o.connect(g); g.connect(ctx.destination);
+  o.start(); o.stop(ctx.currentTime + dur);
+}
+
+function startMelody() {
+  stopMelody();
+  let i = 0;
+  melodyTimer = setInterval(() => beep(MELODY[i++ % MELODY.length], 0.3, 'triangle', 0.04), 400);
+}
+
+function stopMelody() {
+  clearInterval(melodyTimer);
+  melodyTimer = null;
+}
+
+function toggleSound() {
+  state.soundOn = !state.soundOn;
+  $('soundBtn').textContent = state.soundOn ? 'Звук: вкл' : 'Звук: выкл';
+  if (state.soundOn) getAudio();
+}
+
+/* ---------- Сохранение разметки ---------- */
+
+function saveCalib() {
+  state.mask = null; // зона могла измениться — пересчитаем маску
+  try {
+    localStorage.setItem(STORE_KEY, JSON.stringify({
+      zone: state.zone, gates: state.gates, obstacles: state.obstacles
+    }));
+  } catch (e) {
+    showError('Не удалось сохранить разметку на телефоне. Игра работает, но при следующем запуске придётся размечать заново.');
+  }
+}
+
+function loadCalib() {
+  try {
+    const d = JSON.parse(localStorage.getItem(STORE_KEY) || 'null');
+    if (d && Array.isArray(d.zone) && d.zone.length === 4) {
+      state.zone = d.zone;
+      state.gates = d.gates || [];
+      state.obstacles = d.obstacles || [];
+    }
+  } catch (e) {
+    // Сохранённые данные повреждены — начнём разметку заново
+  }
+}
+
+/* ---------- Камера и видео ---------- */
+
+async function startCamera() {
+  clearError();
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    showError('Этот браузер не даёт доступ к камере. Откройте страницу в Safari или Chrome по адресу https.');
+    return false;
+  }
+  getAudio();
+  const attempts = [
+    { video: { facingMode: { ideal: 'environment' }, width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 24 } }, audio: false },
+    { video: true, audio: false } // запасной вариант без настроек
+  ];
+  let err = null;
+  for (const c of attempts) {
+    try {
+      stream = await navigator.mediaDevices.getUserMedia(c);
+      break;
+    } catch (e) {
+      err = e;
+    }
+  }
+  if (!stream) {
+    showError(camError(err));
+    return false;
+  }
+  video.srcObject = stream;
+  try {
+    await video.play();
+  } catch (e) {
+    stopAll();
+    showError('Не удалось запустить видео с камеры. Нажмите кнопку ещё раз.');
+    return false;
+  }
+  return true;
+}
+
+function stopAll() {
+  stopMelody();
+  if (stream) {
+    stream.getTracks().forEach(t => t.stop());
+    stream = null;
+  }
+  video.pause();
+  video.srcObject = null;
+  video.removeAttribute('src');
+  video.load();
+  state.videoReady = false;
+  state.bg = null;
+  state.drone = null;
+  sampling = null;
+}
+
+video.addEventListener('loadedmetadata', () => {
+  view.width = video.videoWidth || 640;
+  view.height = video.videoHeight || 480;
+  state.videoReady = true;
+  renderPanel();
+});
+
+video.addEventListener('error', () => {
+  if (video.currentSrc) showError('Не удалось воспроизвести видео. Попробуйте другой файл (лучше MP4).');
+});
+
+function afterSource() {
+  $('menu').style.display = 'none';
+  setPhase(state.zone.length === 4 ? 'bg' : 'zone');
+}
+
+/* ---------- Геометрия ---------- */
+
+function inPoly(x, y, pts) {
+  let inside = false;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const xi = pts[i][0], yi = pts[i][1], xj = pts[j][0], yj = pts[j][1];
+    if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+
+// Маска: какие пиксели маленькой копии кадра лежат внутри жёлтой зоны
+function buildMask() {
+  const m = new Uint8Array(SW * SH);
+  let c = 0;
+  if (state.zone.length === 4) {
+    for (let y = 0; y < SH; y++) {
+      for (let x = 0; x < SW; x++) {
+        if (inPoly((x + 0.5) / SW, (y + 0.5) / SH, state.zone)) { m[y * SW + x] = 1; c++; }
+      }
+    }
+  }
+  state.mask = m;
+  state.maskCount = c;
+}
+
+/* ---------- Обработка кадров ---------- */
+
+function grabGray() {
+  sctx.drawImage(video, 0, 0, SW, SH);
+  const d = sctx.getImageData(0, 0, SW, SH).data;
+  const g = new Float32Array(SW * SH);
+  for (let i = 0, j = 0; j < g.length; i += 4, j++) {
+    g[j] = d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114;
+  }
+  return g;
+}
+
+function startBgCapture() {
+  if (!state.videoReady) {
+    showError('Камера ещё не готова. Подождите секунду.');
+    return;
+  }
+  clearError();
+  sampling = { sum: null, count: 0, endAt: Date.now() + 2000 };
+  renderPanel();
+}
+
+function finishSampling() {
+  const n = sampling.count, sum = sampling.sum;
+  sampling = null;
+  if (n < 5 || !sum) {
+    showError('Камера передаёт слишком мало кадров. Подождите пару секунд и попробуйте снова.');
+    renderPanel();
+    return;
+  }
+  const bg = new Float32Array(SW * SH);
+  for (let i = 0; i < bg.length; i++) bg[i] = sum[i] / n;
+  state.bg = bg;
+  state.mask = null;
+  clearError();
+  setPhase('ready');
+  toast('Поле запомнено');
+}
+
+// Ищем область, которая отличается от запомненного фона внутри зоны
+function detect(g) {
+  const m = state.mask, bg = state.bg;
+  let n = 0, sx = 0, sy = 0;
+  for (let i = 0; i < m.length; i++) {
+    if (m[i] && Math.abs(g[i] - bg[i]) > DIFF) {
+      n++;
+      sx += i % SW;
+      sy += Math.floor(i / SW);
+    }
+  }
+  if (n < MIN_PIX || n > state.maskCount * MAX_FRAC) return null;
+  return [(sx / n + 0.5) / SW, (sy / n + 0.5) / SH];
+}
+
+/* ---------- Игровые события ---------- */
+
+function addScore(n, msg) {
+  state.score += n;
+  toast(msg);
+}
+
+function checkGameEvents() {
+  const p = state.drone, now = Date.now();
+
+  state.gates.forEach((g, i) => {
+    const gs = gateStates[i];
+    if (now < gs.cool) return;
+    if (p && inPoly(p[0], p[1], g)) {
+      gs.frames++;
+      if (gs.frames >= GATE_FRAMES) {
+        gs.frames = 0;
+        gs.cool = now + GATE_COOLDOWN;
+        state.gatesPassed++;
+        addScore(10, 'Ворота! +10');
+        beep(880, 0.25);
+      }
+    } else {
+      gs.frames = 0;
+    }
+  });
+
+  state.obstacles.forEach((o, i) => {
+    const os = obstStates[i];
+    if (!p || now < os.cool) return;
+    const dx = (p[0] - o[0]) * view.width, dy = (p[1] - o[1]) * view.height;
+    if (Math.hypot(dx, dy) < OBST_R * view.height) {
+      os.cool = now + OBST_COOLDOWN;
+      state.hits++;
+      addScore(-5, 'Препятствие! −5');
+      beep(220, 0.3, 'square', 0.2);
+    }
+  });
+}
+
+/* ---------- Отрисовка ---------- */
+
+function drawOverlays() {
+  const s = state, W = view.width, H = view.height;
+  const px = p => [p[0] * W, p[1] * H];
+
+  const poly = (pts, stroke, fill, close = true) => {
+    if (pts.length < 2) return;
+    vctx.beginPath();
+    pts.forEach((p, i) => {
+      const [x, y] = px(p);
+      if (i === 0) vctx.moveTo(x, y); else vctx.lineTo(x, y);
+    });
+    if (close) vctx.closePath();
+    if (fill) { vctx.fillStyle = fill; vctx.fill(); }
+    vctx.strokeStyle = stroke;
+    vctx.lineWidth = Math.max(2, W / 200);
+    vctx.stroke();
+  };
+
+  if (s.zone.length === 4) poly(s.zone, '#facc15', 'rgba(250,204,21,0.12)');
+  s.gates.forEach(g => poly(g, '#22c55e', 'rgba(34,197,94,0.15)'));
+
+  s.obstacles.forEach(o => {
+    const [x, y] = px(o);
+    vctx.beginPath();
+    vctx.arc(x, y, OBST_R * H, 0, Math.PI * 2);
+    vctx.fillStyle = 'rgba(239,68,68,0.35)';
+    vctx.fill();
+    vctx.strokeStyle = '#ef4444';
+    vctx.lineWidth = 3;
+    vctx.stroke();
+  });
+
+  if (s.pending.length) {
+    poly(s.pending, '#ffffff', null, false);
+    s.pending.forEach(p => {
+      const [x, y] = px(p);
+      vctx.beginPath();
+      vctx.arc(x, y, 6, 0, Math.PI * 2);
+      vctx.fillStyle = '#ffffff';
+      vctx.fill();
+      vctx.strokeStyle = '#000';
+      vctx.lineWidth = 2;
+      vctx.stroke();
+    });
+  }
+
+  if (s.drone && (s.phase === 'playing' || s.phase === 'countdown')) {
+    const [x, y] = px(s.drone);
+    vctx.beginPath();
+    vctx.arc(x, y, H * 0.04, 0, Math.PI * 2);
+    vctx.strokeStyle = '#22c55e';
+    vctx.lineWidth = 4;
+    vctx.stroke();
+  }
+
+  if (s.countdownText) {
+    const big = s.countdownText.length > 2 ? H * 0.2 : H * 0.35;
+    vctx.font = `bold ${big}px sans-serif`;
+    vctx.textAlign = 'center';
+    vctx.textBaseline = 'middle';
+    vctx.lineWidth = H * 0.02;
+    vctx.strokeStyle = 'rgba(0,0,0,0.6)';
+    vctx.fillStyle = '#ffffff';
+    vctx.strokeText(s.countdownText, W / 2, H / 2);
+    vctx.fillText(s.countdownText, W / 2, H / 2);
+  }
+}
+
+function updateStats() {
+  const s = state, el = $('stats');
+  if (s.phase === 'playing') {
+    const left = Math.max(0, Math.ceil((s.endTime - Date.now()) / 1000));
+    el.textContent = `Очки: ${s.score}   Время: ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`;
+  } else if (s.phase === 'over') {
+    el.textContent = `Очки: ${s.score}`;
+  } else {
+    el.textContent = '';
+  }
+}
+
+function loop() {
+  requestAnimationFrame(loop);
+  const s = state;
+
+  if (s.phase === 'playing' && Date.now() >= s.endTime) endGame(true);
+  updateStats();
+
+  if (!s.videoReady || video.readyState < 2) return;
+  vctx.drawImage(video, 0, 0, view.width, view.height);
+  s.frameNo++;
+
+  if (sampling && s.phase === 'bg') {
+    const g = grabGray();
+    if (!sampling.sum) sampling.sum = new Float32Array(SW * SH);
+    for (let i = 0; i < g.length; i++) sampling.sum[i] += g[i];
+    sampling.count++;
+    if (Date.now() >= sampling.endAt) finishSampling();
+  }
+
+  // Обнаружение не на каждом кадре, а через один — так телефон не тормозит
+  if ((s.phase === 'countdown' || s.phase === 'playing') && s.bg && s.frameNo % 2 === 0) {
+    if (!s.mask) buildMask();
+    s.drone = detect(grabGray());
+    if (s.phase === 'playing') checkGameEvents();
+  }
+
+  drawOverlays();
+}
+
+/* ---------- Фазы и панель управления ---------- */
+
+function setPhase(p) {
+  state.phase = p;
+  state.pending = [];
+  state.countdownText = '';
+  sampling = null;
+  renderPanel();
+}
+
+function renderPanel() {
+  const s = state, panel = $('panel'), hint = $('hint'), btns = $('btns');
+  if (s.phase === 'menu') {
+    panel.style.display = 'none';
+    return;
+  }
+  panel.style.display = 'block';
+
+  const B = (act, label, cls = '', dis = false) =>
+    `<button data-act="${act}" class="${cls}" ${dis ? 'disabled' : ''}>${label}</button>`;
+  const camWait = s.videoReady ? '' : ' Ждём изображение с камеры…';
+  let h = '', b = '';
+
+  switch (s.phase) {
+    case 'zone':
+      h = `Нажмите 4 точки по углам зоны полёта, по кругу. Появится жёлтый контур. Точек: ${s.pending.length}/4.`;
+      b = B('undo', 'Отмена', 'sec') + B('reset', 'Сброс', 'sec') +
+          B('next', 'Далее', '', !(s.zone.length === 4 && s.pending.length === 0));
+      break;
+    case 'gates':
+      h = `Каждые 4 точки дают одну рамку ворот (зелёный контур). Готово ворот: ${s.gates.length}. Точек в текущей рамке: ${s.pending.length}/4.`;
+      b = B('undo', 'Отмена', 'sec') + B('reset', 'Сброс', 'sec') +
+          B('next', 'Далее', '', s.pending.length > 0);
+      break;
+    case 'obstacles':
+      h = `Нажмите по одной точке на каждое препятствие (красный круг). Препятствий: ${s.obstacles.length}.`;
+      b = B('undo', 'Отмена', 'sec') + B('reset', 'Сброс', 'sec') + B('next', 'Далее');
+      break;
+    case 'bg':
+      h = sampling
+        ? 'Запоминаем поле… Не двигайте телефон.'
+        : 'Уберите людей и дрон из зоны полёта и нажмите «Запомнить поле». Это займёт около 2 секунд.' + camWait;
+      b = B('bgCapture', 'Запомнить поле', '', !s.videoReady || !!sampling) +
+          B('rezone', 'Перенастроить', 'sec') + B('menu', 'В меню', 'sec');
+      break;
+    case 'ready':
+      h = 'Поле готово. Подготовьте дрон и нажмите СТАРТ. Будет обратный отсчёт 5-4-3-2-1.';
+      b = B('start', 'СТАРТ') + B('toBg', 'Запомнить заново', 'sec') +
+          B('rezone', 'Перенастроить', 'sec') + B('menu', 'В меню', 'sec');
+      break;
+    case 'countdown':
+      h = 'Приготовьтесь!';
+      b = B('cancelCount', 'Отмена', 'sec');
+      break;
+    case 'playing':
+      h = 'Летите через зелёные ворота и не задевайте красные круги. Дрон ищется внутри жёлтой зоны.';
+      b = B('stop', 'Остановить', 'sec');
+      break;
+    case 'over':
+      h = `Игра окончена! Очки: ${s.score}. Ворот пройдено: ${s.gatesPassed}. Препятствий задето: ${s.hits}.`;
+      b = B('again', 'Заново') + B('menu', 'В меню', 'sec');
+      break;
+  }
+  hint.textContent = h;
+  btns.innerHTML = b;
+}
+
+function undo() {
+  const s = state;
+  if (s.pending.length) s.pending.pop();
+  else if (s.phase === 'zone') s.zone = [];
+  else if (s.phase === 'gates') s.gates.pop();
+  else if (s.phase === 'obstacles') s.obstacles.pop();
+  saveCalib();
+  renderPanel();
+}
+
+function nextStep() {
+  const s = state;
+  if (s.phase === 'zone') {
+    if (s.zone.length !== 4 || s.pending.length) return;
+    setPhase('gates');
+  } else if (s.phase === 'gates') {
+    if (s.pending.length) return;
+    setPhase('obstacles');
+  } else if (s.phase === 'obstacles') {
+    setPhase('bg');
+  }
+}
+
+/* ---------- Игра ---------- */
+
+function runCountdown() {
+  if (!state.bg) {
+    showError('Сначала запомните поле: нажмите «Запомнить поле».');
+    return;
+  }
+  setPhase('countdown');
+  let n = 5;
+  const tick = () => {
+    if (state.phase !== 'countdown') return;
+    if (n > 0) {
+      state.countdownText = String(n);
+      beep(660, 0.15);
+      n--;
+      setTimeout(tick, 1000);
+    } else {
+      state.countdownText = 'СТАРТ!';
+      beep(990, 0.4);
+      setTimeout(() => { if (state.phase === 'countdown') beginGame(); }, 600);
+    }
+  };
+  tick();
+}
+
+function beginGame() {
+  const s = state;
+  s.score = 0; s.gatesPassed = 0; s.hits = 0; s.drone = null;
+  gateStates = s.gates.map(() => ({ frames: 0, cool: 0 }));
+  obstStates = s.obstacles.map(() => ({ cool: 0 }));
+  s.endTime = Date.now() + GAME_SECONDS * 1000;
+  if (!s.mask) buildMask();
+  setPhase('playing');
+  startMelody();
+}
+
+function endGame(byTime) {
+  if (state.phase !== 'playing') return;
+  stopMelody();
+  state.drone = null;
+  beep(523, 0.4, 'sine', 0.2);
+  setTimeout(() => beep(392, 0.6, 'sine', 0.2), 300);
+  setPhase('over');
+  toast(byTime ? 'Время вышло!' : 'Игра остановлена');
+}
+
+/* ---------- Меню и переходы ---------- */
+
+function goMenu() {
+  stopAll();
+  state.phase = 'menu';
+  $('menu').style.display = 'flex';
+  renderPanel();
+}
+
+$('btnCam').onclick = async () => {
+  if (await startCamera()) afterSource();
+};
+
+$('btnFile').onclick = () => {
+  clearError();
+  getAudio();
+  $('fileInput').click();
+};
+
+$('fileInput').onchange = e => {
+  const f = e.target.files[0];
+  if (!f) return;
+  clearError();
+  stopAll();
+  video.src = URL.createObjectURL(f);
+  video.loop = true;
+  video.muted = true;
+  video.play().catch(() => showError('Не удалось воспроизвести видеофайл. Попробуйте другой файл.'));
+  afterSource();
+};
+
+$('soundBtn').onclick = toggleSound;
+$('menuBtn').onclick = goMenu;
+
+$('btns').addEventListener('click', e => {
+  const act = e.target.dataset.act;
+  if (!act || e.target.disabled) return;
+  switch (act) {
+    case 'undo': undo(); break;
+    case 'reset':
+      state.zone = []; state.gates = []; state.obstacles = [];
+      saveCalib();
+      setPhase('zone');
+      break;
+    case 'next': nextStep(); break;
+    case 'rezone': setPhase('zone'); break;
+    case 'toBg': setPhase('bg'); break;
+    case 'bgCapture': startBgCapture(); break;
+    case 'start':
+    case 'again': runCountdown(); break;
+    case 'cancelCount': setPhase('ready'); break;
+    case 'stop': endGame(false); break;
+    case 'menu': goMenu(); break;
+  }
+});
+
+// Нажатия по видео — это разметка поля
+view.addEventListener('click', e => {
+  const s = state;
+  if (!s.videoReady) return;
+  const r = view.getBoundingClientRect();
+  const p = [(e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height];
+  if (p[0] < 0 || p[0] > 1 || p[1] < 0 || p[1] > 1) return;
+
+  if (s.phase === 'zone') {
+    s.pending.push(p);
+    if (s.pending.length === 4) {
+      s.zone = s.pending;
+      s.pending = [];
+      saveCalib();
+      toast('Зона полёта запомнена');
+    }
+  } else if (s.phase === 'gates') {
+    s.pending.push(p);
+    if (s.pending.length === 4) {
+      s.gates.push(s.pending);
+      s.pending = [];
+      saveCalib();
+      toast('Ворота добавлены');
+    }
+  } else if (s.phase === 'obstacles') {
+    s.obstacles.push(p);
+    saveCalib();
+  } else {
+    return;
+  }
+  renderPanel();
+});
+
+/* ---------- Запуск ---------- */
+
+loadCalib();
+renderPanel();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
